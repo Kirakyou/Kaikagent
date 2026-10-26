@@ -32,16 +32,12 @@ import okhttp3.WebSocket
 import okhttp3.WebSocketListener
 import java.util.concurrent.TimeUnit
 
-/**
- * 第二部分 4：语音通话模式（Gemini Live API / Firebase AI Logic BidiGenerateContent）
- * - 触发条件：输入“跟我通话”或点击悬浮窗/聊天窗语音按钮
- * - 双向音频流：上行 16kHz 16-bit Mono PCM，下行 24kHz 16-bit Mono PCM
- * - 视觉节流：通话期间自动调用 ScreenCaptureManager.setVoicePauseMode(true) 暂停高频视觉轮询，实现超低延迟对话
- */
 object GeminiLiveVoiceManager {
     private const val TAG = "GeminiLiveVoiceManager"
     private const val INPUT_SAMPLE_RATE = 16000
     private const val OUTPUT_SAMPLE_RATE = 24000
+    // 根据最新 Gemini API 规范使用 gemini-3.8-live 实时语音模型
+    private const val LIVE_MODEL = "models/gemini-3.8-live"
 
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private val httpClient = OkHttpClient.Builder()
@@ -67,25 +63,24 @@ object GeminiLiveVoiceManager {
     }
 
     fun startVoiceSession(apiKey: String) {
-        if (_isLiveActive.value || apiKey.isBlank()) return
+        val cleanKey = apiKey.trim()
+        if (_isLiveActive.value || cleanKey.isBlank()) return
 
-        // 通话期间暂停高频视觉轮询，降低带宽与发热
         ScreenCaptureManager.setVoicePauseMode(true)
         _isLiveActive.value = true
 
         val wsUrl =
-            "wss://generativelanguage.googleapis.com/ws/google.ai.generativelanguage.v1alpha.GenerativeService.BidiGenerateContent?key=$apiKey"
+            "wss://generativelanguage.googleapis.com/ws/google.ai.generativelanguage.v1alpha.GenerativeService.BidiGenerateContent?key=$cleanKey"
         val request = Request.Builder().url(wsUrl).build()
 
         initAudioTrack()
 
         webSocket = httpClient.newWebSocket(request, object : WebSocketListener() {
             override fun onOpen(webSocket: WebSocket, response: Response) {
-                Log.i(TAG, "Gemini Live API WebSocket Connected")
-                // 发送初始 Setup 握手帧（指定原生音频模型与 AUDIO 响应模态）
+                Log.i(TAG, "Gemini Live API Connected ($LIVE_MODEL)")
                 val setupFrame = buildJsonObject {
                     put("setup", buildJsonObject {
-                        put("model", "models/gemini-2.0-flash-exp")
+                        put("model", LIVE_MODEL)
                         put("generationConfig", buildJsonObject {
                             put("responseModalities", buildJsonArray {
                                 add(kotlinx.serialization.json.JsonPrimitive("AUDIO"))
@@ -130,7 +125,7 @@ object GeminiLiveVoiceManager {
                 minBufSize * 2
             )
 
-            val buffer = ByteArray(3200) // 100ms per chunk at 16kHz 16-bit
+            val buffer = ByteArray(3200)
             try {
                 recorder.startRecording()
                 while (isActive && _isLiveActive.value) {
@@ -151,7 +146,7 @@ object GeminiLiveVoiceManager {
                     }
                 }
             } catch (e: Exception) {
-                Log.e(TAG, "AudioRecord streaming error", e)
+                Log.e(TAG, "AudioRecord error", e)
             } finally {
                 try {
                     recorder.stop()

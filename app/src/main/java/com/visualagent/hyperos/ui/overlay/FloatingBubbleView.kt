@@ -3,10 +3,13 @@ package com.visualagent.hyperos.ui.overlay
 import android.annotation.SuppressLint
 import android.content.Context
 import android.content.Intent
+import android.graphics.Bitmap
+import android.graphics.BitmapFactory
 import android.graphics.Canvas
 import android.graphics.Color
 import android.graphics.Paint
 import android.graphics.PixelFormat
+import android.graphics.Rect
 import android.os.Build
 import android.provider.Settings
 import android.view.Choreographer
@@ -16,6 +19,7 @@ import android.view.View
 import android.view.ViewConfiguration
 import android.view.WindowManager
 import com.visualagent.hyperos.MainActivity
+import com.visualagent.hyperos.R
 import com.visualagent.hyperos.agent.AgentRunner
 import com.visualagent.hyperos.agent.GeminiLiveVoiceManager
 import com.visualagent.hyperos.ui.sound.McSoundManager
@@ -23,10 +27,10 @@ import kotlin.math.abs
 import kotlin.math.sin
 
 /**
- * 第二部分 3：悬浮窗（Floating Bubble）
- * - 类型：优先 TYPE_ACCESSIBILITY_OVERLAY，备选 TYPE_APPLICATION_OVERLAY
- * - 动画驱动：Choreographer.postFrameCallback 原生高刷驱动，自绘单层 View Canvas
- * - 交互：点击停止任务 (Cancel AgentRunner) / 展开聊天窗；长按拖拽（拖拽时关闭非必要动画）
+ * 原生 Minecraft 方块材质高刷悬浮球：
+ * - 待机状态渲染真实的 Minecraft 草方块贴图 (mc_grass_block_icon)
+ * - 运行/语音状态渲染真实的 Minecraft 命令方块贴图 (mc_command_block_icon)
+ * - Choreographer 原生跟随高刷，拖拽时自动关闭发光边框计算
  */
 class FloatingBubbleView(
     context: Context,
@@ -35,16 +39,26 @@ class FloatingBubbleView(
 ) : View(context), Choreographer.FrameCallback {
 
     private val density = resources.displayMetrics.density
-    private val bubbleSizePx = (58 * density).toInt()
+    private val bubbleSizePx = (54 * density).toInt()
 
-    private val paint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-        style = Paint.Style.FILL
+    private val grassBitmap: Bitmap = BitmapFactory.decodeResource(resources, R.drawable.mc_grass_block_icon)
+    private val cmdBitmap: Bitmap = BitmapFactory.decodeResource(resources, R.drawable.mc_command_block_icon)
+    private val dstRect = Rect(0, 0, bubbleSizePx, bubbleSizePx)
+
+    private val bitmapPaint = Paint().apply {
+        isFilterBitmap = false // 保持原汁原味的像素颗粒感，禁止双线性模糊
+        isAntiAlias = false
+    }
+    private val borderPaint = Paint().apply {
+        style = Paint.Style.STROKE
+        strokeWidth = 2.5f * density
     }
     private val textPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
         color = Color.WHITE
-        textSize = 11f * density
+        textSize = 10.5f * density
         textAlign = Paint.Align.CENTER
         isFakeBoldText = true
+        setShadowLayer(2f * density, 1.5f * density, 1.5f * density, Color.BLACK)
     }
 
     private var phaseRad = 0f
@@ -68,13 +82,8 @@ class FloatingBubbleView(
         super.onDetachedFromWindow()
     }
 
-    /**
-     * Choreographer 高刷帧回调（跟随 60Hz / 120Hz / 144Hz VSYNC 信号）
-     */
     override fun doFrame(frameTimeNanos: Long) {
         if (!isAttached) return
-
-        // 硬性要求：长按拖拽时关闭非必要动画计算，节省渲染开销
         if (!isDragging) {
             val running = AgentRunner.isRunning.value
             val liveVoice = GeminiLiveVoiceManager.isLiveActive.value
@@ -82,7 +91,6 @@ class FloatingBubbleView(
             phaseRad = (phaseRad + speed) % (Math.PI.toFloat() * 2f)
             invalidate()
         }
-
         Choreographer.getInstance().postFrameCallback(this)
     }
 
@@ -92,45 +100,37 @@ class FloatingBubbleView(
 
     override fun onDraw(canvas: Canvas) {
         super.onDraw(canvas)
-        val w = width.toFloat()
-        val h = height.toFloat()
-        val border = 3f * density
+        val w = width
+        val h = height
+        dstRect.set(0, 0, w, h)
 
         val isRunning = AgentRunner.isRunning.value
         val isVoice = GeminiLiveVoiceManager.isLiveActive.value
 
-        // 1. 绘制 Minecraft 像素方块外黑框
-        paint.color = Color.parseColor("#111111")
-        canvas.drawRect(0f, 0f, w, h, paint)
+        // 1. 绘制真实的 Minecraft 草方块或命令方块材质贴图
+        val bmp = if (isRunning || isVoice) cmdBitmap else grassBitmap
+        canvas.drawBitmap(bmp, null, dstRect, bitmapPaint)
 
-        // 2. 根据状态选择绿/红/蓝主色调（拖拽时使用静态石板灰，关闭呼吸脉冲）
-        val baseColor = when {
-            isDragging -> Color.parseColor("#7D7D7D")
-            isRunning -> Color.parseColor("#B3312C") // 运行中显示红石色，点击即可立即停止
-            isVoice -> Color.parseColor("#2C7IB3".replace('I', '8')) // 语音通话中显示钻石蓝
-            else -> Color.parseColor("#3C8527") // 待机显示绿宝石色
-        }
-        paint.color = baseColor
-        canvas.drawRect(border, border, w - border, h - border, paint)
-
-        // 3. 非拖拽状态下绘制 Choreographer 驱动的像素能量脉冲内框
+        // 2. 非拖拽时绘制附魔呼吸像素边框
         if (!isDragging) {
-            val pulseAlpha = ((sin(phaseRad.toDouble()) * 0.5 + 0.5) * 140 + 40).toInt()
-            paint.color = Color.argb(pulseAlpha, 255, 255, 255)
-            val inset = border * 2.2f
-            canvas.drawRect(inset, inset, w - inset, inset + border, paint)
-            canvas.drawRect(inset, inset, inset + border, h - inset, paint)
+            val alpha = ((sin(phaseRad.toDouble()) * 0.5 + 0.5) * 160 + 50).toInt()
+            borderPaint.color = when {
+                isRunning -> Color.argb(alpha, 255, 85, 85)
+                isVoice -> Color.argb(alpha, 85, 255, 255)
+                else -> Color.argb(alpha, 120, 230, 90)
+            }
+            val inset = borderPaint.strokeWidth / 2f
+            canvas.drawRect(inset, inset, w - inset, h - inset, borderPaint)
         }
 
-        // 4. 绘制中心像素状态文字
+        // 3. 底部像素状态标签
         val label = when {
-            isDragging -> "MOVE"
-            isRunning -> "STOP"
-            isVoice -> "LIVE"
+            isDragging -> "移动"
+            isRunning -> "停止"
+            isVoice -> "通话"
             else -> "AI"
         }
-        val textY = h / 2f - (textPaint.descent() + textPaint.ascent()) / 2f
-        canvas.drawText(label, w / 2f, textY, textPaint)
+        canvas.drawText(label, w / 2f, h - 7f * density, textPaint)
     }
 
     @SuppressLint("ClickableViewAccessibility")
@@ -150,7 +150,7 @@ class FloatingBubbleView(
                 val dy = event.rawY - downRawY
                 if (!isDragging && (abs(dx) > touchSlop || abs(dy) > touchSlop)) {
                     isDragging = true
-                    invalidate() // 立即切换为静态无动画绘制态
+                    invalidate()
                 }
                 if (isDragging) {
                     layoutParams.x = (initialWinX + dx).toInt()
@@ -177,12 +177,10 @@ class FloatingBubbleView(
 
     private fun handleBubbleClick() {
         McSoundManager.playClick()
-        // 硬性要求：若 Agent 正在执行，点击悬浮球立即发送 Cancel 信号停止任务
         if (AgentRunner.isRunning.value) {
-            AgentRunner.cancelCurrentTask("用户点击 Minecraft 悬浮球紧急停止")
+            AgentRunner.cancelCurrentTask("已通过悬浮方块停止任务")
             return
         }
-        // 否则展开/拉起 VisualAgent 聊天窗口
         val intent = Intent(context, MainActivity::class.java).apply {
             addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_SINGLE_TOP)
             putExtra(MainActivity.EXTRA_OPEN_TAB, MainActivity.TAB_CHAT)
@@ -191,9 +189,6 @@ class FloatingBubbleView(
     }
 }
 
-/**
- * 悬浮球挂载管理器（支持 TYPE_ACCESSIBILITY_OVERLAY 与 TYPE_APPLICATION_OVERLAY 双通道）
- */
 object FloatingOverlayController {
     private var bubbleView: FloatingBubbleView? = null
     private var currentWm: WindowManager? = null
@@ -211,7 +206,7 @@ object FloatingOverlayController {
         ).apply {
             gravity = Gravity.TOP or Gravity.START
             x = 24
-            y = 420
+            y = 460
         }
         val view = FloatingBubbleView(serviceContext, wm, params)
         try {
@@ -242,7 +237,7 @@ object FloatingOverlayController {
         ).apply {
             gravity = Gravity.TOP or Gravity.START
             x = 24
-            y = 420
+            y = 460
         }
         val view = FloatingBubbleView(appCtx, wm, params)
         try {
