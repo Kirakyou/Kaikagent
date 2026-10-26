@@ -1,0 +1,29 @@
+name: Unzip workspace
+on: workflow_dispatch
+permissions:
+  contents: write
+jobs:
+  unzip:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Unzip and push
+        run: |
+          unzip -o "VisualAgent_Android16_Full_Project.zip" -d _tmp
+          ls -la _tmp
+          if [ -d "_tmp/.github" ]; then
+            cp -a _tmp/. .
+          else
+            TOP=$(find _tmp -mindepth 1 -maxdepth 1 -type d | head -n 1)
+            if [ -n "$TOP" ]; then
+              cp -a "$TOP"/. .
+            else
+              cp -a _tmp/. .
+            fi
+          fi
+          rm -rf _tmp
+          git config user.name "github-actions"
+          git config user.email "github-actions@github.com"
+          git add -A
+          git commit -m "Unzip VisualAgent_Android16_Full_Project" || echo "No changes"
+          git push
